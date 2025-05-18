@@ -79,13 +79,17 @@ class MongoDBHandler(DatabaseHandler):
             await self.db.messages.create_index([("created_at", DESCENDING)])
             await self.db.messages.create_index([("chat_id", ASCENDING), ("created_at", DESCENDING)])
             
+            logger.info("MongoDB indexes created successfully")
+            
         except Exception as e:
             logger.error(f"Failed to create indexes: {e}")
+            raise DatabaseError(f"Failed to create MongoDB indexes: {e}")
     
     async def close(self) -> None:
         """Close the database connection."""
         if self.client:
             self.client.close()
+            logger.info("MongoDB connection closed")
     
     # Helper methods
     
@@ -113,16 +117,23 @@ class MongoDBHandler(DatabaseHandler):
         Returns:
             Dict[str, Any]: Prepared data
         """
+        prepared_data = data.copy()
+        
         # Convert string IDs to ObjectId
-        if "_id" in data and isinstance(data["_id"], str):
-            data["_id"] = self._convert_id(data["_id"])
+        if "_id" in prepared_data and isinstance(prepared_data["_id"], str):
+            prepared_data["_id"] = self._convert_id(prepared_data["_id"])
         
-        # Convert datetime objects to MongoDB format
-        for key, value in data.items():
-            if isinstance(value, datetime.datetime):
-                data[key] = value
+        # Process nested objects
+        for key, value in prepared_data.items():
+            if isinstance(value, dict):
+                prepared_data[key] = self._prepare_data(value)
+            elif isinstance(value, list):
+                prepared_data[key] = [
+                    self._prepare_data(item) if isinstance(item, dict) else item
+                    for item in value
+                ]
         
-        return data
+        return prepared_data
     
     def _format_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Format data from MongoDB.
@@ -136,22 +147,26 @@ class MongoDBHandler(DatabaseHandler):
         if not data:
             return data
         
+        formatted_data = data.copy()
+        
         # Convert ObjectId to string
-        if "_id" in data:
-            data["id"] = str(data["_id"])
-            del data["_id"]
+        if "_id" in formatted_data:
+            formatted_data["id"] = str(formatted_data["_id"])
+            del formatted_data["_id"]
         
         # Format nested documents
-        for key, value in list(data.items()):
+        for key, value in list(formatted_data.items()):
             if isinstance(value, dict):
-                data[key] = self._format_data(value)
+                formatted_data[key] = self._format_data(value)
             elif isinstance(value, list):
-                data[key] = [
+                formatted_data[key] = [
                     self._format_data(item) if isinstance(item, dict) else item
                     for item in value
                 ]
+            elif isinstance(value, ObjectId):
+                formatted_data[key] = str(value)
         
-        return data
+        return formatted_data
     
     # Generic CRUD operations
     
@@ -319,10 +334,7 @@ class MongoDBHandler(DatabaseHandler):
         try:
             # Prepare filters
             query = filters or {}
-            
-            # Convert ID to ObjectId if present
-            if "_id" in query and isinstance(query["_id"], str):
-                query["_id"] = self._convert_id(query["_id"])
+            query = self._prepare_data(query)
             
             # Prepare sort
             sort_criteria = sort or {"created_at": -1}
@@ -360,10 +372,7 @@ class MongoDBHandler(DatabaseHandler):
         try:
             # Prepare filters
             query = filters or {}
-            
-            # Convert ID to ObjectId if present
-            if "_id" in query and isinstance(query["_id"], str):
-                query["_id"] = self._convert_id(query["_id"])
+            query = self._prepare_data(query)
             
             # Count records
             return await self.db[collection].count_documents(query)
