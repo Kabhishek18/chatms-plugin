@@ -1,0 +1,32 @@
+graph TD
+    Client[Client Applications] -->|WebSocket/REST| API[API Layer]
+    API --> Core[Chat System Core]
+    Core --> ConnMgr[Connection Manager]
+    Core --> DBHandler[Database Handler]
+    Core --> StorageHandler[Storage Handler]
+    Core --> NotifHandler[Notification Handler]
+    Core --> Encryption[Encryption Service]
+    Core --> ContentMod[Content Moderation]
+    Core --> Analytics[Analytics Service]
+    
+    DBHandler -->|PostgreSQL| PSQL[(PostgreSQL)]
+    DBHandler -->|MongoDB| Mongo[(MongoDB)]
+    
+    StorageHandler -->|Local| Local[(Local Storage)]
+    StorageHandler -->|S3| S3[(AWS S3)]
+    StorageHandler -->|GCP| GCP[(Google Cloud)]
+    StorageHandler -->|Azure| Azure[(Azure Blob)]
+    
+    ConnMgr -->|Pub/Sub| Redis[(Redis)]
+    
+    NotifHandler --> FCM[Firebase Cloud Messaging]
+    NotifHandler --> APNS[Apple Push Notification]
+    NotifHandler --> Email[Email Service]
+    
+    subgraph "Message Flow"
+        Send[Send Message] --> Validate[Validate Message]
+        Validate --> Encrypt[Encrypt Message]
+        Encrypt --> Store[Store in Database]
+        Store --> BroadcastWS[Broadcast via WebSocket]
+        Store --> PushNotif[Push Notifications]
+    end
