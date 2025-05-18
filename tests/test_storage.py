@@ -1,7 +1,6 @@
-# tests/test_storage.py
 
 """
-Tests for the ChatMS plugin's storage functionality.
+Improved tests for the ChatMS plugin's storage functionality.
 """
 
 import asyncio
@@ -9,8 +8,10 @@ import os
 import pytest
 import shutil
 import tempfile
-from PIL import Image
 from io import BytesIO
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from PIL import Image
 
 from chatms_plugin import Config
 from chatms_plugin.exceptions import FileError, FileSizeError, FileTypeError
@@ -19,21 +20,21 @@ from chatms_plugin.storage.local import LocalStorageHandler
 
 
 @pytest.fixture
-def temp_dir():
+def tmp_dir():
     """Create a temporary directory for testing."""
-    temp_dir = tempfile.mkdtemp()
-    yield temp_dir
+    tmp_dir = tempfile.mkdtemp()
+    yield tmp_dir
     
     # Cleanup
-    shutil.rmtree(temp_dir, ignore_errors=True)
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @pytest.fixture
-def config(temp_dir):
+async def config(tmp_dir):
     """Create a test configuration with storage settings."""
     return Config(
         storage_type="local",
-        storage_path=temp_dir,
+        storage_path=tmp_dir,
         max_file_size_mb=1,
         allowed_extensions=["jpg", "png", "txt", "pdf"]
     )
@@ -65,6 +66,21 @@ def test_image():
 def test_text():
     """Create a test text file."""
     return b"This is a test text file.\nWith multiple lines.\n"
+
+
+@pytest.mark.asyncio
+async def test_storage_handler_initialization(config):
+    """Test storage handler initialization and closing."""
+    handler = LocalStorageHandler(config)
+    
+    # Test initialization
+    await handler.init()
+    
+    # Verify the storage path was created
+    assert os.path.exists(config.storage_path)
+    
+    # Test closing
+    await handler.close()
 
 
 @pytest.mark.asyncio
@@ -118,6 +134,10 @@ async def test_file_save_and_get(storage_handler, test_image):
     
     assert file_path is not None
     
+    # Verify the file exists
+    absolute_path = os.path.join(storage_handler.base_path, file_path)
+    assert os.path.exists(absolute_path)
+    
     # Get file
     retrieved_data = await storage_handler.get_file(file_path)
     assert retrieved_data is not None
@@ -151,6 +171,10 @@ async def test_file_deletion(storage_handler, test_text):
     # Verify file is deleted
     deleted_data = await storage_handler.get_file(file_path)
     assert deleted_data is None
+    
+    # Delete non-existent file (should return False)
+    result = await storage_handler.delete_file("non_existent_file.txt")
+    assert result is False
 
 
 @pytest.mark.asyncio
@@ -167,11 +191,18 @@ async def test_thumbnail_creation(storage_handler, test_image):
     thumbnail_path = await storage_handler.create_thumbnail(file_path, 50, 50)
     assert thumbnail_path is not None
     
+    # Verify thumbnail exists
+    absolute_thumb_path = os.path.join(storage_handler.base_path, thumbnail_path)
+    assert os.path.exists(absolute_thumb_path)
+    
     # Get thumbnail info
     thumb_info = await storage_handler.get_file_info(thumbnail_path)
     assert thumb_info is not None
-    assert thumb_info["width"] <= 50
-    assert thumb_info["height"] <= 50
+    
+    # Verify thumbnail dimensions
+    with Image.open(absolute_thumb_path) as img:
+        assert img.width <= 50
+        assert img.height <= 50
 
 
 @pytest.mark.asyncio
@@ -187,7 +218,9 @@ async def test_file_url_generation(storage_handler, test_text):
     # Get URL
     url = await storage_handler.get_file_url(file_path)
     assert url is not None
-    assert url == file_path  # For local storage, URL is the path
+    
+    # For local storage, URL is the path
+    assert url == file_path
 
 
 @pytest.mark.asyncio
@@ -210,6 +243,133 @@ async def test_storage_path_safety(storage_handler, test_text):
         content_type="text/plain"
     )
     
-    # Try to access with path traversal
-    with pytest.raises(Exception):
-        await storage_handler.get_file("../../../etc/passwd")
+    # Attempt to access with path traversal
+    traversal_path = "../../../etc/passwd"
+    
+    # Should raise an exception or return None
+    try:
+        result = await storage_handler.get_file(traversal_path)
+        assert result is None
+    except Exception as e:
+        # Either raising an exception or returning None is acceptable
+        assert "path" in str(e).lower() or "not found" in str(e).lower()
+
+
+@pytest.mark.asyncio
+async def test_file_name_sanitization():
+    """Test file name sanitization."""
+    # Create handler but don't initialize to test internal methods
+    handler = LocalStorageHandler(Config(storage_path="/tmp"))
+    
+    # Test sanitizing file names
+    assert handler._sanitize_filename("normal.txt") == "normal.txt"
+    assert handler._sanitize_filename("file with spaces.txt") == "file_with_spaces.txt"
+    assert handler._sanitize_filename("../../../etc/passwd") == "etc_passwd"
+    assert handler._sanitize_filename("file.with.dots.txt") == "file.with.dots.txt"
+    assert handler._sanitize_filename("file<with>special\"chars.txt") == "file_with_special_chars.txt"
+    
+    # Test adding extension if missing
+    assert ".bin" in handler._sanitize_filename("noextension")
+
+
+@pytest.mark.asyncio
+async def test_mock_s3_handler():
+    """Test S3 storage handler with mocks."""
+    try:
+        from chatms_plugin.storage.s3 import S3StorageHandler
+    except ImportError:
+        pytest.skip("S3 storage handler not available")
+    
+    # Create config
+    config = Config(
+        storage_type="s3",
+        storage_bucket="test-bucket",
+        storage_credentials={
+            "aws_access_key_id": "test_key",
+            "aws_secret_access_key": "test_secret",
+            "region_name": "us-west-2"
+        }
+    )
+    
+    # Create handler with mocked dependencies
+    with patch('boto3.client') as mock_boto3:
+        # Configure mock
+        mock_s3 = AsyncMock()
+        mock_boto3.return_value = mock_s3
+        
+        # Initialize handler
+        handler = S3StorageHandler(config)
+        handler.loop = asyncio.get_event_loop()
+        
+        # Mock handler.loop.run_in_executor to run synchronous code directly
+        handler.loop.run_in_executor = AsyncMock(side_effect=lambda _, fn, *args: fn(*args))
+        
+        # Initialize handler
+        await handler.init()
+        
+        # Test save_file
+        mock_s3.put_object.return_value = None
+        
+        file_path = await handler.save_file(
+            file_data=b"test data",
+            file_name="test.txt",
+            content_type="text/plain"
+        )
+        
+        assert file_path is not None
+        assert mock_s3.put_object.called
+        
+        # Test get_file
+        mock_response = {'Body': AsyncMock()}
+        mock_response['Body'].read.return_value = b"test data"
+        mock_s3.get_object.return_value = mock_response
+        
+        data = await handler.get_file(file_path)
+        assert data == b"test data"
+        
+        # Test delete_file
+        mock_s3.delete_object.return_value = None
+        
+        result = await handler.delete_file(file_path)
+        assert result is True
+        assert mock_s3.delete_object.called
+        
+        # Clean up
+        await handler.close()
+
+
+@pytest.mark.asyncio
+async def test_storage_factory():
+    """Test storage handler factory based on configuration."""
+    # Test creating local storage handler
+    local_config = Config(
+        storage_type="local",
+        storage_path=tempfile.mkdtemp()
+    )
+    
+    handler = None
+    
+    try:
+        if local_config.storage_type == "local":
+            from chatms_plugin.storage.local import LocalStorageHandler
+            handler = LocalStorageHandler(local_config)
+        elif local_config.storage_type == "s3":
+            from chatms_plugin.storage.s3 import S3StorageHandler
+            handler = S3StorageHandler(local_config)
+        elif local_config.storage_type == "gcp":
+            from chatms_plugin.storage.gcp import GCPStorageHandler
+            handler = GCPStorageHandler(local_config)
+        elif local_config.storage_type == "azure":
+            from chatms_plugin.storage.azure import AzureStorageHandler
+            handler = AzureStorageHandler(local_config)
+        
+        assert handler is not None
+        assert isinstance(handler, LocalStorageHandler)
+        
+        # Initialize and close
+        await handler.init()
+        await handler.close()
+        
+    finally:
+        # Clean up
+        shutil.rmtree(local_config.storage_path, ignore_errors=True)

@@ -115,6 +115,88 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
 ```
+
+
+## Integration with Django
+### ChatMS can be easily integrated with Django applications:
+
+```python
+# In your Django settings.py
+CHATMS_CONFIG = {
+    'database_type': 'postgresql',
+    'database_url': 'postgresql://user:password@localhost/chatdb',
+    'storage_type': 'local',
+    'storage_path': os.path.join(BASE_DIR, 'media', 'chat_files'),
+    'jwt_secret': SECRET_KEY,
+    'jwt_expiration_minutes': 60,
+    'enable_encryption': True,
+    'encryption_key': 'your-secure-encryption-key',
+}
+
+# In your Django apps.py
+from django.apps import AppConfig
+
+class ChatMSConfig(AppConfig):
+    name = 'chatms_integration'
+    verbose_name = 'Chat Messaging System'
+    
+    def ready(self):
+        from chatms_plugin import ChatSystem, Config
+        from chatms_plugin.api.django import setup_django_integration
+        from django.conf import settings
+        
+        # Create config from Django settings
+        config = Config(**settings.CHATMS_CONFIG)
+        
+        # Initialize chat system
+        import asyncio
+        loop = asyncio.new_event_loop()
+        
+        chat_system = ChatSystem(config)
+        loop.run_until_complete(chat_system.init())
+        
+        # Store chat system in app config
+        self.chat_system = chat_system
+        
+        # Set up Django integration
+        self.rest_api, self.channels_api = setup_django_integration(chat_system)
+
+# In your Django urls.py
+from django.urls import path, include
+from .apps import ChatMSConfig
+
+urlpatterns = [
+    # ... other URL patterns ...
+    path('api/chat/', include(ChatMSConfig.rest_api.get_urls())),
+]
+
+# In your Django asgi.py
+import os
+from django.core.asgi import get_asgi_application
+from channels.routing import ProtocolTypeRouter, URLRouter
+from channels.auth import AuthMiddlewareStack
+from django.urls import path
+from .apps import ChatMSConfig
+
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'yourproject.settings')
+
+# Get WebSocket consumer
+consumer = ChatMSConfig.channels_api.get_consumer()
+
+# Define WebSocket URL patterns
+websocket_urlpatterns = [
+    path('ws//', consumer.as_asgi()),
+]
+
+# Configure ASGI application
+application = ProtocolTypeRouter({
+    "http": get_asgi_application(),
+    "websocket": AuthMiddlewareStack(
+        URLRouter(websocket_urlpatterns)
+    ),
+})
+```
+
 ## Core Concepts
 ### Users
 #### Users are the entities that interact with the chat system. Each user has a unique ID, username, and password. Users can join chats, send messages, and receive notifications.
