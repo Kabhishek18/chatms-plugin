@@ -1,4 +1,3 @@
-# tests/test_security.py
 
 """
 Tests for the ChatMS plugin's security functionality.
@@ -67,14 +66,24 @@ async def test_token_generation_and_validation(security_manager):
     # Get user ID from token
     extracted_user_id = await security_manager.get_user_id_from_token(token)
     assert extracted_user_id == user_id
-    
-    # Test with expired token
-    import time
+
+
+@pytest.mark.asyncio
+async def test_expired_token(security_manager):
+    """Test with expired token."""
+    # Create a token that expires immediately
+    user_id = "test_user_id"
     expired_token = await security_manager.create_token(user_id, expires_minutes=-1)
+    
+    # Try to decode the expired token
     with pytest.raises(AuthenticationError):
         await security_manager.decode_token(expired_token)
-    
-    # Test with invalid token
+
+
+@pytest.mark.asyncio
+async def test_invalid_token(security_manager):
+    """Test with invalid token."""
+    # Try to decode an invalid token
     with pytest.raises(AuthenticationError):
         await security_manager.decode_token("invalid.token.here")
 
@@ -126,7 +135,10 @@ async def test_config_validation(config):
     # Should not raise any exceptions
     
     # Invalid configuration: missing JWT secret
-    invalid_config = Config(jwt_secret="")
+    invalid_config = Config(
+        jwt_secret="",
+        enable_encryption=False  # Disable encryption to avoid that error
+    )
     with pytest.raises(ConfigurationError):
         SecurityManager(invalid_config)
     
