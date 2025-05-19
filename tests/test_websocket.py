@@ -23,6 +23,10 @@ class MockWebSocket:
         self.close_code = None
         self.close_reason = None
     
+    async def accept(self):
+        """Accept the connection."""
+        pass
+    
     async def send_json(self, data):
         self.sent_messages.append(data)
     
@@ -35,7 +39,7 @@ class MockWebSocket:
         self.close_reason = reason
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def config():
     """Create a test configuration."""
     return Config(
@@ -43,7 +47,7 @@ def config():
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def connection_manager(config):
     """Create a connection manager for testing."""
     return ConnectionManager(config)

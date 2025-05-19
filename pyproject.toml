@@ -29,7 +29,7 @@ dependencies = [
     "sqlalchemy>=1.4.0",
     "motor>=2.5.0",
     "pydantic>=1.8.0",
-    "python-jose[cryptography]>=3.3.0",
+    "python-jose>=3.3.0",
     "passlib[bcrypt]>=1.7.4",
     "python-multipart>=0.0.5",
     "aioredis>=2.0.0",
@@ -58,7 +58,8 @@ dev = [
 "Bug Tracker" = "https://github.com/Kabhishek18/chatms-plugin/issues"
 
 [tool.setuptools]
-package-dir = {"" = "chatms-plugin"}
+# Remove or correct this line:
+# package-dir = {"" = "chatms-plugin"}
 
 [tool.black]
 line-length = 100
@@ -74,3 +75,6 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

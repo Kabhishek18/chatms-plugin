@@ -23,7 +23,7 @@ from ..models.chat import Chat
 from ..models.message import Message, Reaction
 from ..models.user import User
 from .base import DatabaseHandler, T
-
+from sqlalchemy.orm import declarative_base
 
 logger = logging.getLogger(__name__)
 Base = declarative_base()
@@ -62,7 +62,7 @@ class SQLChat(Base):
     icon_url = sa.Column(sa.String, nullable=True)
     chat_type = sa.Column(sa.String, nullable=False)
     is_encrypted = sa.Column(sa.Boolean, default=False)
-    metadata = sa.Column(sa.JSON, default=dict)
+    chat_metadata = sa.Column(sa.JSON, default=dict)
     created_at = sa.Column(sa.DateTime, default=datetime.datetime.now)
     updated_at = sa.Column(sa.DateTime, nullable=True)
     
@@ -106,7 +106,7 @@ class SQLMessage(Base):
     is_pinned = sa.Column(sa.Boolean, default=False)
     is_deleted = sa.Column(sa.Boolean, default=False)
     delete_for_everyone = sa.Column(sa.Boolean, default=False)
-    metadata = sa.Column(sa.JSON, default=dict)
+    chat_metadata = sa.Column(sa.JSON, default=dict)    
     created_at = sa.Column(sa.DateTime, default=datetime.datetime.now)
     updated_at = sa.Column(sa.DateTime, nullable=True)
     
@@ -132,7 +132,7 @@ class SQLAttachment(Base):
     width = sa.Column(sa.Integer, nullable=True)
     height = sa.Column(sa.Integer, nullable=True)
     duration = sa.Column(sa.Integer, nullable=True)
-    metadata = sa.Column(sa.JSON, default=dict)
+    chat_metadata = sa.Column(sa.JSON, default=dict)    
     created_at = sa.Column(sa.DateTime, default=datetime.datetime.now)
     
     message = relationship("SQLMessage", back_populates="attachments")

@@ -14,7 +14,7 @@ from chatms_plugin.core.security import SecurityManager
 from chatms_plugin.exceptions import AuthenticationError, ConfigurationError
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def config():
     """Create a test configuration."""
     return Config(
@@ -25,7 +25,7 @@ def config():
         encryption_key="0123456789abcdef0123456789abcdef"
     )
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def security_manager(config):
     """Create a security manager for testing."""
     return SecurityManager(config)

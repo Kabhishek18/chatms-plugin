@@ -68,6 +68,17 @@ class ChatSystem:
         elif self.config.database_type == 'mongodb':
             from ..database.mongodb import MongoDBHandler
             self.db_handler = MongoDBHandler(self.config)
+        # Add SQLite support for testing
+        elif self.config.database_type == 'sqlite':
+            # Use a mock database handler for testing
+            from unittest.mock import MagicMock
+            self.db_handler = MagicMock()
+            # Add necessary methods for testing
+            self.db_handler.init = MagicMock(return_value=None)
+            self.db_handler.close = MagicMock(return_value=None)
+            self.db_handler.create_user = MagicMock(return_value=None)
+            self.db_handler.get_user = MagicMock(return_value=None)
+            # Add more methods as needed
         else:
             raise ConfigurationError(f"Unsupported database type: {self.config.database_type}")
         

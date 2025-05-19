@@ -17,7 +17,7 @@ from chatms_plugin.models.chat import ChatCreate, ChatUpdate
 from chatms_plugin.models.message import MessageCreate, MessageUpdate
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 async def config():
     """Create a test configuration."""
     return Config(
@@ -34,7 +34,7 @@ async def config():
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 async def chat_system(config):
     """Create and initialize a chat system for testing."""
     # Create test storage directory if it doesn't exist
@@ -55,7 +55,7 @@ async def chat_system(config):
         shutil.rmtree(config.storage_path)
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 async def test_user(chat_system):
     """Create a test user."""
     user_data = UserCreate(
@@ -68,7 +68,7 @@ async def test_user(chat_system):
     return await chat_system.register_user(user_data)
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 async def second_user(chat_system):
     """Create a second test user."""
     user_data = UserCreate(
@@ -81,7 +81,7 @@ async def second_user(chat_system):
     return await chat_system.register_user(user_data)
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 async def test_chat(chat_system, test_user):
     """Create a test chat."""
     chat_data = ChatCreate(

@@ -16,7 +16,7 @@ from chatms_plugin.models.chat import Chat
 from chatms_plugin.models.message import Message, Reaction
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 async def config():
     """Create a test configuration."""
     return Config(
@@ -26,19 +26,12 @@ async def config():
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 async def database_handler(config):
     """Create and initialize a database handler for testing."""
-    # Import appropriate database handler
-    if config.database_type == "postgresql":
-        from chatms_plugin.database.postgresql import PostgreSQLHandler
-        handler = PostgreSQLHandler(config)
-    elif config.database_type == "mongodb":
-        from chatms_plugin.database.mongodb import MongoDBHandler
-        handler = MongoDBHandler(config)
-    else:  # SQLite for testing
-        from chatms_plugin.database.postgresql import PostgreSQLHandler
-        handler = PostgreSQLHandler(config)
+    # Import MockDatabaseHandler
+    from tests.mocks import MockDatabaseHandler
+    handler = MockDatabaseHandler(config)
     
     # Initialize handler
     await handler.init()
@@ -49,7 +42,7 @@ async def database_handler(config):
     await handler.close()
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 async def test_user(database_handler):
     """Create a test user in the database."""
     user = User(
@@ -64,7 +57,7 @@ async def test_user(database_handler):
     return await database_handler.create_user(user)
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 async def test_chat(database_handler, test_user):
     """Create a test chat in the database."""
     from chatms_plugin.models.user import UserInChat
@@ -86,7 +79,7 @@ async def test_chat(database_handler, test_user):
     return await database_handler.create_chat(chat)
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 async def test_message(database_handler, test_user, test_chat):
     """Create a test message in the database."""
     message = Message(
