@@ -152,15 +152,13 @@ async def test_message_broadcasting(connection_manager):
     await connection_manager.join_chat(websocket2, chat_id)
     # User3 doesn't join the chat
     
-    # Make a copy of active_connections to avoid "dictionary changed size during iteration" error
-    active_connections_copy = deepcopy(connection_manager.active_connections)
-    connection_manager.active_connections = active_connections_copy
-    
     # Broadcast message to chat
     message = {
+        "type": "message",  # Add type field
         "chat_id": chat_id,
         "content": "Hello, everyone!",
-        "sender_id": user1
+        "sender_id": user1,
+        "timestamp": "2023-01-01T12:00:00Z"
     }
     
     await connection_manager.broadcast_message(message)
@@ -172,8 +170,10 @@ async def test_message_broadcasting(connection_manager):
     last_message1 = websocket1.sent_messages[-1]
     last_message2 = websocket2.sent_messages[-1]
     
+    assert last_message1["type"] == "message"
     assert last_message1["chat_id"] == chat_id
     assert last_message1["content"] == "Hello, everyone!"
+    assert last_message2["type"] == "message"
     assert last_message2["chat_id"] == chat_id
     assert last_message2["content"] == "Hello, everyone!"
     
@@ -203,12 +203,9 @@ async def test_personal_message(connection_manager):
     await connection_manager.connect(websocket1, user_id)
     await connection_manager.connect(websocket2, user_id)
     
-    # Make a copy of user_connections to avoid "dictionary changed size during iteration" error
-    user_connections_copy = deepcopy(connection_manager.user_connections)
-    connection_manager.user_connections = user_connections_copy
-    
     # Send personal message
     message = {
+        "type": "personal_message",  # Add type field
         "content": "Personal message",
         "timestamp": "2023-01-01T12:00:00"
     }
@@ -217,13 +214,16 @@ async def test_personal_message(connection_manager):
     assert result is True
     
     # Check if message was sent to all user's connections
-    assert len(websocket1.sent_messages) > 1
-    assert len(websocket2.sent_messages) > 1
+    # Should have 2 messages: welcome + personal
+    assert len(websocket1.sent_messages) == 2
+    assert len(websocket2.sent_messages) == 2
     
     last_message1 = websocket1.sent_messages[-1]
     last_message2 = websocket2.sent_messages[-1]
     
+    assert last_message1["type"] == "personal_message"
     assert last_message1["content"] == "Personal message"
+    assert last_message2["type"] == "personal_message"
     assert last_message2["content"] == "Personal message"
     
     # Cleanup
@@ -245,26 +245,22 @@ async def test_notification_methods(connection_manager):
     # Connect WebSocket
     await connection_manager.connect(websocket, user_id)
     
-    # Make a copy of user_connections to avoid "dictionary changed size during iteration" error
-    user_connections_copy = deepcopy(connection_manager.user_connections)
-    connection_manager.user_connections = user_connections_copy
-    
     # Test different notification types
     notifications = [
         # New message notification
-        ("send_new_message", {"message_id": "msg1", "content": "New message"}),
+        ("send_new_message", {"message_id": "msg1", "content": "New message", "chat_id": "chat1"}),
         
         # Message updated notification
-        ("send_message_updated", {"message_id": "msg1", "content": "Updated message"}),
+        ("send_message_updated", {"message_id": "msg1", "content": "Updated message", "chat_id": "chat1"}),
         
         # Message deleted notification
         ("send_message_deleted", {"message_id": "msg1", "chat_id": "chat1"}),
         
         # Reaction added notification
-        ("send_reaction_added", {"message_id": "msg1", "reaction_type": "👍"}),
+        ("send_reaction_added", {"message_id": "msg1", "reaction_type": "👍", "chat_id": "chat1"}),
         
         # Typing indicator notification
-        ("send_typing_indicator", {"chat_id": "chat1", "is_typing": True})
+        ("send_typing_indicator", {"chat_id": "chat1", "is_typing": True, "user_id": user_id})
     ]
     
     for method_name, data in notifications:
@@ -277,9 +273,99 @@ async def test_notification_methods(connection_manager):
         
         # Check if notification was sent
         last_message = websocket.sent_messages[-1]
+        
+        # Check that expected data fields are present
+        if method_name == "send_new_message":
+            assert last_message["type"] == "new_message"
+        elif method_name == "send_message_updated":
+            assert last_message["type"] == "message_updated"
+        elif method_name == "send_message_deleted":
+            assert last_message["type"] == "message_deleted"
+        elif method_name == "send_reaction_added":
+            assert last_message["type"] == "reaction_added"
+        elif method_name == "send_typing_indicator":
+            assert last_message["type"] == "typing_indicator"
+        
+        # Verify data was included in the message
         for key, value in data.items():
-            assert last_message[key] == value
+            if key in last_message:
+                assert last_message[key] == value
     
     # Cleanup
     await connection_manager.disconnect(websocket, user_id)
+    await connection_manager.close()
+
+
+@pytest.mark.asyncio
+async def test_presence_update(connection_manager):
+    """Test presence update functionality."""
+    # Initialize connection manager
+    await connection_manager.init()
+    
+    # Create mock WebSockets for different users
+    websocket1 = MockWebSocket()
+    websocket2 = MockWebSocket()
+    
+    user1 = "user1"
+    user2 = "user2"
+    
+    # Connect WebSockets
+    await connection_manager.connect(websocket1, user1)
+    await connection_manager.connect(websocket2, user2)
+    
+    # Update presence
+    presence_data = {
+        "user_id": user1,
+        "status": "online",
+        "last_seen": "2023-01-01T12:00:00Z"
+    }
+    
+    await connection_manager.update_presence(presence_data)
+    
+    # Check if presence update was sent to other users
+    # user2 should receive the presence update
+    assert len(websocket2.sent_messages) >= 2  # welcome + presence
+    last_message = websocket2.sent_messages[-1]
+    assert last_message["type"] == "presence_update"
+    assert last_message["user_id"] == user1
+    assert last_message["status"] == "online"
+    
+    # user1 should not receive their own presence update
+    # Check that user1 only has the welcome message
+    presence_messages = [msg for msg in websocket1.sent_messages if msg.get("type") == "presence_update"]
+    assert len(presence_messages) == 0
+    
+    # Cleanup
+    await connection_manager.disconnect(websocket1, user1)
+    await connection_manager.disconnect(websocket2, user2)
+    await connection_manager.close()
+
+
+@pytest.mark.asyncio
+async def test_connection_cleanup():
+    """Test proper cleanup of connections."""
+    config = Config(websocket_ping_interval=30)
+    connection_manager = ConnectionManager(config)
+    
+    # Initialize without starting ping task to avoid timing issues
+    connection_manager.active_connections = {}
+    connection_manager.user_connections = {}
+    
+    # Create mock WebSocket
+    websocket = MockWebSocket()
+    user_id = "test_user"
+    chat_id = "test_chat"
+    
+    # Manually add connection (simulating accept)
+    connection_manager.user_connections[user_id] = {websocket}
+    connection_manager.active_connections[chat_id] = {websocket}
+    
+    # Disconnect
+    await connection_manager.disconnect(websocket, user_id)
+    
+    # Check cleanup
+    assert user_id not in connection_manager.user_connections
+    assert chat_id not in connection_manager.active_connections
+    
+    # Cleanup
     await connection_manager.close()

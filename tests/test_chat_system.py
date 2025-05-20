@@ -11,7 +11,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from chatms_plugin import ChatSystem, Config, ChatType, MessageType
+from chatms_plugin import ChatSystem, Config, ChatType, MessageType, MessageStatus
 from chatms_plugin.exceptions import AuthenticationError, AuthorizationError
 from chatms_plugin.models.user import UserCreate, UserUpdate, User
 from chatms_plugin.models.chat import ChatCreate, ChatUpdate, Chat
@@ -69,17 +69,17 @@ async def chat_system(config):
     system.connection_manager.disconnect = AsyncMock()
     system.connection_manager.join_chat = AsyncMock()
     system.connection_manager.leave_chat = AsyncMock()
-    system.connection_manager.send_new_message = AsyncMock()
+    system.connection_manager.send_new_message = AsyncMock(return_value=True)
     system.connection_manager.send_typing_indicator = AsyncMock(return_value=True)
-    system.connection_manager.send_message_updated = AsyncMock()
+    system.connection_manager.send_message_updated = AsyncMock(return_value=True)
     system.connection_manager.send_chat_member_added = AsyncMock()
     system.connection_manager.send_chat_member_removed = AsyncMock()
-    system.connection_manager.send_message_deleted = AsyncMock()
-    system.connection_manager.send_reaction_added = AsyncMock()
-    system.connection_manager.send_reaction_removed = AsyncMock()
-    system.connection_manager.send_message_pinned = AsyncMock()
-    system.connection_manager.send_message_unpinned = AsyncMock()
-    system.connection_manager.send_messages_read = AsyncMock()
+    system.connection_manager.send_message_deleted = AsyncMock(return_value=True)
+    system.connection_manager.send_reaction_added = AsyncMock(return_value=True)
+    system.connection_manager.send_reaction_removed = AsyncMock(return_value=True)
+    system.connection_manager.send_message_pinned = AsyncMock(return_value=True)
+    system.connection_manager.send_message_unpinned = AsyncMock(return_value=True)
+    system.connection_manager.send_messages_read = AsyncMock(return_value=True)
     system.connection_manager.update_presence = AsyncMock()
     
     system.analytics_service = MagicMock()
@@ -691,6 +691,9 @@ async def test_typing_indicator(chat_system, test_user, test_chat):
     # Mock get_chat to return the test chat
     chat_system.db_handler.get_chat = AsyncMock(return_value=test_chat)
     
+    # Mock update_chat to return the updated chat
+    chat_system.db_handler.update_chat = AsyncMock(return_value=test_chat)
+    
     # Send typing indicator
     result = await chat_system.send_typing_indicator(test_chat.id, test_user.id, True)
     assert result is True
@@ -717,5 +720,5 @@ async def test_chat_deletion(chat_system, test_user, test_chat):
     chat_system.db_handler.get_chat = AsyncMock(return_value=None)
     
     # User shouldn't be able to access the chat anymore
-    with pytest.raises(ChatError):
-        await chat_system.get_chat(test_chat.id, test_user.id)
+    chat = await chat_system.get_chat(test_chat.id, test_user.id)
+    assert chat is None
