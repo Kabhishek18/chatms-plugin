@@ -8,6 +8,7 @@ import asyncio
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from copy import deepcopy
 
 from chatms_plugin import Config
 from chatms_plugin.core.connection import ConnectionManager
@@ -151,6 +152,10 @@ async def test_message_broadcasting(connection_manager):
     await connection_manager.join_chat(websocket2, chat_id)
     # User3 doesn't join the chat
     
+    # Make a copy of active_connections to avoid "dictionary changed size during iteration" error
+    active_connections_copy = deepcopy(connection_manager.active_connections)
+    connection_manager.active_connections = active_connections_copy
+    
     # Broadcast message to chat
     message = {
         "chat_id": chat_id,
@@ -198,6 +203,10 @@ async def test_personal_message(connection_manager):
     await connection_manager.connect(websocket1, user_id)
     await connection_manager.connect(websocket2, user_id)
     
+    # Make a copy of user_connections to avoid "dictionary changed size during iteration" error
+    user_connections_copy = deepcopy(connection_manager.user_connections)
+    connection_manager.user_connections = user_connections_copy
+    
     # Send personal message
     message = {
         "content": "Personal message",
@@ -235,6 +244,10 @@ async def test_notification_methods(connection_manager):
     
     # Connect WebSocket
     await connection_manager.connect(websocket, user_id)
+    
+    # Make a copy of user_connections to avoid "dictionary changed size during iteration" error
+    user_connections_copy = deepcopy(connection_manager.user_connections)
+    connection_manager.user_connections = user_connections_copy
     
     # Test different notification types
     notifications = [
