@@ -1,360 +1,513 @@
-"""Mock implementations for testing."""
+# chatms_plugin/core/connection.py
+
+"""
+WebSocket connection manager for the ChatMS plugin.
+"""
 
 import asyncio
-from unittest.mock import MagicMock, AsyncMock
-from datetime import datetime
-import uuid
+import datetime
+import json
+import logging
+from typing import Any, Dict, List, Optional, Set, Union
 
-from chatms_plugin.database.base import DatabaseHandler
-from chatms_plugin.models.user import User
-from chatms_plugin.models.chat import Chat
-from chatms_plugin.models.message import Message, Reaction
+from fastapi import WebSocket, WebSocketDisconnect
+
+from ..config import Config
+from ..exceptions import ConnectionError
 
 
-class MockDatabaseHandler(DatabaseHandler):
-    """Mock database handler for testing."""
+logger = logging.getLogger(__name__)
+
+
+class ConnectionManager:
+    """Manages WebSocket connections for real-time messaging."""
     
-    def __init__(self, config):
-        """Initialize the mock database handler."""
+    def __init__(self, config: Config):
+        """Initialize the connection manager.
+        
+        Args:
+            config: Configuration object
+        """
         self.config = config
-        self.users = {}
-        self.chats = {}
-        self.messages = {}
-        self.reactions = {}
+        self.active_connections: Dict[str, Set[WebSocket]] = {}  # chat_id -> set of WebSockets
+        self.user_connections: Dict[str, Set[WebSocket]] = {}  # user_id -> set of WebSockets
+        self.ping_task = None
     
-    async def init(self):
-        """Initialize the database connection."""
-        pass
+    async def init(self) -> None:
+        """Initialize the connection manager."""
+        # Start ping task
+        self.ping_task = asyncio.create_task(self._ping_clients())
     
-    async def close(self):
-        """Close the database connection."""
-        pass
+    async def close(self) -> None:
+        """Close all connections."""
+        # Cancel ping task
+        if self.ping_task:
+            self.ping_task.cancel()
+            try:
+                await self.ping_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Close all WebSocket connections
+        for user_id, connections in list(self.user_connections.items()):
+            for connection in list(connections):
+                try:
+                    await connection.close()
+                except Exception as e:
+                    logger.error(f"Error closing connection for user {user_id}: {e}")
+        
+        # Clear connection dictionaries
+        self.active_connections.clear()
+        self.user_connections.clear()
     
-    # Generic CRUD operations
-    async def create(self, model):
-        """Create a new record in the database."""
-        if not hasattr(model, 'id') or not model.id:
-            model.id = str(uuid.uuid4())
-        model.created_at = datetime.now()
-        model.updated_at = datetime.now()
-        return model
+    async def _ping_clients(self) -> None:
+        """Send periodic pings to clients to keep connections alive."""
+        while True:
+            try:
+                # Sleep first to avoid immediate ping on startup
+                await asyncio.sleep(self.config.websocket_ping_interval)
+                
+                # Ping all connections - create a copy to avoid iteration issues
+                user_connections_copy = dict(self.user_connections)
+                for user_id, connections in user_connections_copy.items():
+                    for connection in list(connections):
+                        try:
+                            await connection.send_json({"type": "ping", "timestamp": datetime.datetime.now().isoformat()})
+                        except Exception as e:
+                            logger.error(f"Error pinging user {user_id}: {e}")
+                            # Remove failed connection
+                            await self.disconnect(connection, user_id)
+            except asyncio.CancelledError:
+                # Task was cancelled, exit
+                break
+            except Exception as e:
+                logger.error(f"Error in ping task: {e}")
+                # Sleep briefly to avoid tight loop in case of persistent error
+                await asyncio.sleep(1)
     
-    async def get(self, collection, id):
-        """Get a record by ID."""
-        if collection == "users" and id in self.users:
-            return self.users[id].dict()
-        elif collection == "chats" and id in self.chats:
-            return self.chats[id].dict()
-        elif collection == "messages" and id in self.messages:
-            return self.messages[id].dict()
-        return None
-    
-    async def update(self, collection, id, data):
-        """Update a record by ID."""
-        if collection == "users" and id in self.users:
-            for key, value in data.items():
-                setattr(self.users[id], key, value)
-            self.users[id].updated_at = datetime.now()
-            return self.users[id].dict()
-        elif collection == "chats" and id in self.chats:
-            for key, value in data.items():
-                setattr(self.chats[id], key, value)
-            self.chats[id].updated_at = datetime.now()
-            return self.chats[id].dict()
-        elif collection == "messages" and id in self.messages:
-            for key, value in data.items():
-                setattr(self.messages[id], key, value)
-            self.messages[id].updated_at = datetime.now()
-            return self.messages[id].dict()
-        return None
-    
-    async def delete(self, collection, id):
-        """Delete a record by ID."""
-        if collection == "users" and id in self.users:
-            del self.users[id]
-            return True
-        elif collection == "chats" and id in self.chats:
-            del self.chats[id]
-            return True
-        elif collection == "messages" and id in self.messages:
-            del self.messages[id]
-            return True
-        return False
-    
-    async def list(self, collection, filters=None, skip=0, limit=100, sort=None):
-        """List records with optional filtering, pagination, and sorting."""
-        if collection == "users":
-            items = list(self.users.values())[skip:skip+limit]
-            return [item.dict() for item in items]
-        elif collection == "chats":
-            items = list(self.chats.values())[skip:skip+limit]
-            return [item.dict() for item in items]
-        elif collection == "messages":
-            items = list(self.messages.values())
+    async def connect(self, websocket: WebSocket, user_id: str) -> None:
+        """Connect a user to WebSocket.
+        
+        Args:
+            websocket: The WebSocket connection
+            user_id: The user ID
             
-            # Apply filters
-            if filters:
-                filtered_items = []
-                for item in items:
-                    match = True
-                    for key, value in filters.items():
-                        if not hasattr(item, key) or getattr(item, key) != value:
-                            match = False
-                            break
-                    if match:
-                        filtered_items.append(item)
-                items = filtered_items
+        Raises:
+            ConnectionError: If there was an error accepting the connection
+        """
+        try:
+            await websocket.accept()
+        except Exception as e:
+            raise ConnectionError(f"Failed to accept WebSocket connection: {e}")
+        
+        # Add to user connections
+        if user_id not in self.user_connections:
+            self.user_connections[user_id] = set()
+        
+        self.user_connections[user_id].add(websocket)
+        
+        # Send welcome message
+        await websocket.send_json({
+            "type": "connected",
+            "user_id": user_id,
+            "timestamp": datetime.datetime.now().isoformat()
+        })
+        
+        logger.info(f"User {user_id} connected")
+    
+    async def disconnect(self, websocket: WebSocket, user_id: str) -> None:
+        """Disconnect a user from WebSocket.
+        
+        Args:
+            websocket: The WebSocket connection
+            user_id: The user ID
+        """
+        # Remove from user connections - avoid iteration issues
+        if user_id in self.user_connections:
+            self.user_connections[user_id].discard(websocket)
+            if not self.user_connections[user_id]:
+                del self.user_connections[user_id]
+        
+        # Remove from all chat rooms - create a copy to avoid iteration issues
+        chat_rooms_to_remove = []
+        for chat_id, connections in list(self.active_connections.items()):
+            connections.discard(websocket)
+            if not connections:
+                chat_rooms_to_remove.append(chat_id)
+        
+        # Remove empty chat rooms
+        for chat_id in chat_rooms_to_remove:
+            self.active_connections.pop(chat_id, None)
+        
+        logger.info(f"User {user_id} disconnected")
+    
+    async def join_chat(self, websocket: WebSocket, chat_id: str) -> None:
+        """Add a connection to a chat room.
+        
+        Args:
+            websocket: The WebSocket connection
+            chat_id: The chat ID
+        """
+        if chat_id not in self.active_connections:
+            self.active_connections[chat_id] = set()
+        
+        self.active_connections[chat_id].add(websocket)
+        
+        # Send joined message
+        await websocket.send_json({
+            "type": "chat_joined",
+            "chat_id": chat_id,
+            "timestamp": datetime.datetime.now().isoformat()
+        })
+        
+        logger.info(f"WebSocket connection joined chat {chat_id}")
+    
+    async def leave_chat(self, websocket: WebSocket, chat_id: str) -> None:
+        """Remove a connection from a chat room.
+        
+        Args:
+            websocket: The WebSocket connection
+            chat_id: The chat ID
+        """
+        if chat_id in self.active_connections:
+            self.active_connections[chat_id].discard(websocket)
+            if not self.active_connections[chat_id]:
+                del self.active_connections[chat_id]
             
-            # Apply sorting
-            if sort:
-                for sort_key, direction in sort.items():
-                    if hasattr(items[0] if items else None, sort_key):
-                        items.sort(key=lambda x: getattr(x, sort_key), reverse=(direction < 0))
+            # Send left message
+            try:
+                await websocket.send_json({
+                    "type": "chat_left",
+                    "chat_id": chat_id,
+                    "timestamp": datetime.datetime.now().isoformat()
+                })
+            except Exception as e:
+                logger.error(f"Error sending chat_left message: {e}")
+    
+    async def broadcast_message(self, message: Dict[str, Any]) -> None:
+        """Broadcast a message to all connections in a chat room.
+        
+        Args:
+            message: The message to broadcast
+        """
+        chat_id = message.get("chat_id")
+        if not chat_id:
+            logger.error("Cannot broadcast message without chat_id")
+            return
+        
+        if chat_id in self.active_connections:
+            # Add message type if not present
+            if "type" not in message:
+                message["type"] = "message"
             
-            # Apply pagination
-            items = items[skip:skip+limit]
-            return [item.dict() for item in items]
-        return []
+            # Add timestamp if not present
+            if "timestamp" not in message:
+                message["timestamp"] = datetime.datetime.now().isoformat()
+            
+            # Send to all connections in the chat - create a copy to avoid iteration issues
+            connections_copy = list(self.active_connections[chat_id])
+            for connection in connections_copy:
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    logger.error(f"Failed to broadcast message to chat {chat_id}: {e}")
+                    # Connection might be closed, will be removed on next ping
     
-    async def count(self, collection, filters=None):
-        """Count records with optional filtering."""
-        if collection == "users":
-            return len(self.users)
-        elif collection == "chats":
-            return len(self.chats)
-        elif collection == "messages":
-            return len(self.messages)
-        return 0
+    async def send_personal_message(self, user_id: str, message: Dict[str, Any]) -> bool:
+        """Send a message to a specific user across all their connections.
+        
+        Args:
+            user_id: The user ID
+            message: The message to send
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        if user_id not in self.user_connections:
+            return False
+        
+        # Add message type if not present
+        if "type" not in message:
+            message["type"] = "personal_message"
+        
+        # Add timestamp if not present
+        if "timestamp" not in message:
+            message["timestamp"] = datetime.datetime.now().isoformat()
+        
+        # Send to all user connections - create a copy to avoid iteration issues
+        connections_copy = list(self.user_connections[user_id])
+        sent = False
+        for connection in connections_copy:
+            try:
+                await connection.send_json(message)
+                sent = True
+            except Exception as e:
+                logger.error(f"Failed to send personal message to user {user_id}: {e}")
+                # Connection might be closed, will be removed on next ping
+        
+        return sent
     
-    # User operations
-    async def create_user(self, user):
-        """Create a new user."""
-        if not user.id:
-            user.id = str(uuid.uuid4())
-        user.created_at = datetime.now()
-        user.updated_at = datetime.now()
-        self.users[user.id] = user
-        return user
+    # Specific message type senders
     
-    async def get_user(self, user_id):
-        """Get a user by ID."""
-        return self.users.get(user_id)
+    async def send_new_message(self, user_id: str, message_data: Dict[str, Any]) -> bool:
+        """Send a new message notification to a user.
+        
+        Args:
+            user_id: The user ID
+            message_data: The message data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        message_data["type"] = "new_message"
+        return await self.send_personal_message(user_id, message_data)
     
-    async def get_user_by_username(self, username):
-        """Get a user by username."""
-        for user in self.users.values():
-            if user.username == username:
-                return user
-        return None
+    async def send_message_updated(self, user_id: str, message_data: Dict[str, Any]) -> bool:
+        """Send a message updated notification to a user.
+        
+        Args:
+            user_id: The user ID
+            message_data: The message data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        message_data["type"] = "message_updated"
+        return await self.send_personal_message(user_id, message_data)
     
-    async def update_user(self, user_id, data):
-        """Update a user."""
-        if user_id in self.users:
-            user = self.users[user_id]
-            for key, value in data.items():
-                setattr(user, key, value)
-            user.updated_at = datetime.now()
-            return user
-        return None
+    async def send_message_deleted(self, user_id: str, delete_data: Dict[str, Any]) -> bool:
+        """Send a message deleted notification to a user.
+        
+        Args:
+            user_id: The user ID
+            delete_data: The deletion data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        delete_data["type"] = "message_deleted"
+        return await self.send_personal_message(user_id, delete_data)
     
-    async def delete_user(self, user_id):
-        """Delete a user."""
-        if user_id in self.users:
-            del self.users[user_id]
-            return True
-        return False
+    async def send_message_delivered(self, user_id: str, delivery_data: Dict[str, Any]) -> bool:
+        """Send a message delivered notification to a user.
+        
+        Args:
+            user_id: The user ID
+            delivery_data: The delivery data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        delivery_data["type"] = "message_delivered"
+        return await self.send_personal_message(user_id, delivery_data)
     
-    # Chat operations
-    async def create_chat(self, chat):
-        """Create a new chat."""
-        if not chat.id:
-            chat.id = str(uuid.uuid4())
-        chat.created_at = datetime.now()
-        chat.updated_at = datetime.now()
-        self.chats[chat.id] = chat
-        return chat
+    async def send_messages_read(self, user_id: str, read_data: Dict[str, Any]) -> bool:
+        """Send a messages read notification to a user.
         
-    async def get_chat(self, chat_id):
-        """Get a chat by ID."""
-        return self.chats.get(chat_id)
+        Args:
+            user_id: The user ID
+            read_data: The read data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        read_data["type"] = "messages_read"
+        return await self.send_personal_message(user_id, read_data)
+    
+    async def send_reaction_added(self, user_id: str, reaction_data: Dict[str, Any]) -> bool:
+        """Send a reaction added notification to a user.
         
-    async def update_chat(self, chat_id, data):
-        """Update a chat."""
-        if chat_id in self.chats:
-            chat = self.chats[chat_id]
-            for key, value in data.items():
-                setattr(chat, key, value)
-            chat.updated_at = datetime.now()
-            return chat
-        return None
+        Args:
+            user_id: The user ID
+            reaction_data: The reaction data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        reaction_data["type"] = "reaction_added"
+        return await self.send_personal_message(user_id, reaction_data)
+    
+    async def send_reaction_removed(self, user_id: str, reaction_data: Dict[str, Any]) -> bool:
+        """Send a reaction removed notification to a user.
         
-    async def delete_chat(self, chat_id):
-        """Delete a chat."""
-        if chat_id in self.chats:
-            del self.chats[chat_id]
-            return True
-        return False
+        Args:
+            user_id: The user ID
+            reaction_data: The reaction data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        reaction_data["type"] = "reaction_removed"
+        return await self.send_personal_message(user_id, reaction_data)
+    
+    async def send_message_pinned(self, user_id: str, pin_data: Dict[str, Any]) -> bool:
+        """Send a message pinned notification to a user.
         
-    async def get_user_chats(self, user_id, skip=0, limit=100):
-        """Get all chats for a user."""
-        user_chats = []
-        for chat in self.chats.values():
-            for member in chat.members:
-                if member.user_id == user_id:
-                    user_chats.append(chat)
-                    break
-        return user_chats[skip:skip+limit]
+        Args:
+            user_id: The user ID
+            pin_data: The pin data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        pin_data["type"] = "message_pinned"
+        return await self.send_personal_message(user_id, pin_data)
+    
+    async def send_message_unpinned(self, user_id: str, unpin_data: Dict[str, Any]) -> bool:
+        """Send a message unpinned notification to a user.
         
-    async def add_chat_member(self, chat_id, user_id, role):
-        """Add a member to a chat."""
-        if chat_id in self.chats:
-            from chatms_plugin.models.user import UserInChat
-            from chatms_plugin.config import UserRole
-            chat = self.chats[chat_id]
-            for member in chat.members:
-                if member.user_id == user_id:
-                    return True
-            chat.members.append(UserInChat(user_id=user_id, role=UserRole(role)))
-            return True
-        return False
+        Args:
+            user_id: The user ID
+            unpin_data: The unpin data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        unpin_data["type"] = "message_unpinned"
+        return await self.send_personal_message(user_id, unpin_data)
+    
+    async def send_chat_created(self, user_id: str, chat_data: Dict[str, Any]) -> bool:
+        """Send a chat created notification to a user.
         
-    async def remove_chat_member(self, chat_id, user_id):
-        """Remove a member from a chat."""
-        if chat_id in self.chats:
-            chat = self.chats[chat_id]
-            for i, member in enumerate(chat.members):
-                if member.user_id == user_id:
-                    chat.members.pop(i)
-                    return True
-        return False
+        Args:
+            user_id: The user ID
+            chat_data: The chat data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        message = {
+            "type": "chat_created",
+            "chat": chat_data.dict() if hasattr(chat_data, "dict") else chat_data
+        }
+        return await self.send_personal_message(user_id, message)
+    
+    async def send_chat_updated(self, user_id: str, chat_data: Dict[str, Any]) -> bool:
+        """Send a chat updated notification to a user.
         
-    async def get_chat_members(self, chat_id):
-        """Get all members of a chat."""
-        if chat_id in self.chats:
-            return [member.dict() for member in self.chats[chat_id].members]
-        return []
+        Args:
+            user_id: The user ID
+            chat_data: The chat data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        message = {
+            "type": "chat_updated",
+            "chat": chat_data.dict() if hasattr(chat_data, "dict") else chat_data
+        }
+        return await self.send_personal_message(user_id, message)
+    
+    async def send_chat_deleted(self, user_id: str, chat_id: str) -> bool:
+        """Send a chat deleted notification to a user.
         
-    # Message operations
-    async def create_message(self, message):
-        """Create a new message."""
-        if not message.id:
-            message.id = str(uuid.uuid4())
-        message.created_at = datetime.now()
-        message.updated_at = datetime.now()
-        self.messages[message.id] = message
-        return message
+        Args:
+            user_id: The user ID
+            chat_id: The chat ID
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        message = {
+            "type": "chat_deleted",
+            "chat_id": chat_id,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+        return await self.send_personal_message(user_id, message)
+    
+    async def send_chat_member_added(self, chat_id: str, user_id: str, chat_data: Dict[str, Any]) -> None:
+        """Send a chat member added notification to all members of a chat.
         
-    async def get_message(self, message_id):
-        """Get a message by ID."""
-        return self.messages.get(message_id)
-        
-    async def update_message(self, message_id, data):
-        """Update a message."""
-        if message_id in self.messages:
-            message = self.messages[message_id]
-            for key, value in data.items():
-                setattr(message, key, value)
-            message.updated_at = datetime.now()
-            return message
-        return None
-        
-    async def delete_message(self, message_id, delete_for_everyone=False):
-        """Delete a message."""
-        if delete_for_everyone and message_id in self.messages:
-            del self.messages[message_id]
-            return True
-        elif message_id in self.messages:
-            self.messages[message_id].is_deleted = True
-            return True
-        return False
-        
-    async def get_chat_messages(self, chat_id, before_id=None, after_id=None, skip=0, limit=50):
-        """Get messages for a chat with pagination."""
-        chat_messages = [msg for msg in self.messages.values() if msg.chat_id == chat_id]
-        if before_id:
-            before_msg = self.messages.get(before_id)
-            if before_msg:
-                chat_messages = [msg for msg in chat_messages if msg.created_at < before_msg.created_at]
-        if after_id:
-            after_msg = self.messages.get(after_id)
-            if after_msg:
-                chat_messages = [msg for msg in chat_messages if msg.created_at > after_msg.created_at]
-        return sorted(chat_messages, key=lambda x: x.created_at, reverse=True)[skip:skip+limit]
-        
-    async def get_message_count(self, chat_id, since=None):
-        """Get the number of messages in a chat since a specific time."""
-        count = 0
-        for msg in self.messages.values():
-            if msg.chat_id == chat_id:
-                if since:
-                    if msg.created_at.isoformat() > since:
-                        count += 1
-                else:
-                    count += 1
-        return count
-        
-    # Reaction operations
-    async def add_reaction(self, message_id, user_id, reaction_type):
-        """Add a reaction to a message."""
-        if message_id in self.messages:
-            message = self.messages[message_id]
-            from chatms_plugin.models.message import Reaction
-            reaction = Reaction(
-                id=str(uuid.uuid4()),
-                user_id=user_id, 
-                reaction_type=reaction_type,
-                created_at=datetime.now()
-            )
-            for r in message.reactions:
-                if r.user_id == user_id and r.reaction_type == reaction_type:
-                    return r
-            message.reactions.append(reaction)
-            return reaction
-        return None
-        
-    async def remove_reaction(self, message_id, user_id, reaction_type):
-        """Remove a reaction from a message."""
-        if message_id in self.messages:
-            message = self.messages[message_id]
-            for i, r in enumerate(message.reactions):
-                if r.user_id == user_id and r.reaction_type == reaction_type:
-                    message.reactions.pop(i)
-                    return True
-        return False
-        
-    async def get_message_reactions(self, message_id):
-        """Get all reactions for a message."""
-        if message_id in self.messages:
-            return self.messages[message_id].reactions
-        return []
-        
-    # Search operations
-    async def search_messages(self, query, user_id, chat_id=None, skip=0, limit=20):
-        """Search for messages."""
-        results = []
-        for message in self.messages.values():
-            if chat_id and message.chat_id != chat_id:
-                continue
-            if query.lower() in message.content.lower():
-                # Check if user has access to this chat
-                chat = self.chats.get(message.chat_id)
-                if chat and any(member.user_id == user_id for member in chat.members):
-                    results.append(message)
-        return results[skip:skip+limit]
-        
-    # Stats and aggregation
-    async def get_chat_stats(self, chat_id):
-        """Get statistics for a chat."""
-        return {
-            "message_count": sum(1 for msg in self.messages.values() if msg.chat_id == chat_id),
-            "member_count": len(self.chats.get(chat_id, Chat()).members) if chat_id in self.chats else 0,
-            "reaction_count": sum(len(msg.reactions) for msg in self.messages.values() if msg.chat_id == chat_id)
+        Args:
+            chat_id: The chat ID
+            user_id: The ID of the user who was added
+            chat_data: The updated chat data
+        """
+        message = {
+            "type": "chat_member_added",
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "chat": chat_data.dict() if hasattr(chat_data, "dict") else chat_data,
+            "timestamp": datetime.datetime.now().isoformat()
         }
         
-    async def get_user_stats(self, user_id):
-        """Get statistics for a user."""
-        return {
-            "message_count": sum(1 for msg in self.messages.values() if msg.sender_id == user_id),
-            "chat_count": sum(1 for chat in self.chats.values() if any(member.user_id == user_id for member in chat.members)),
-            "reaction_count": sum(1 for msg in self.messages.values() for r in msg.reactions if r.user_id == user_id)
+        # Broadcast to all members, including the new member
+        await self.broadcast_message(message)
+        
+        # Also send directly to the new member in case they're not in the chat room yet
+        await self.send_personal_message(user_id, message)
+    
+    async def send_chat_member_removed(self, chat_id: str, user_id: str, chat_data: Dict[str, Any]) -> None:
+        """Send a chat member removed notification to all members of a chat.
+        
+        Args:
+            chat_id: The chat ID
+            user_id: The ID of the user who was removed
+            chat_data: The updated chat data
+        """
+        message = {
+            "type": "chat_member_removed",
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "chat": chat_data.dict() if hasattr(chat_data, "dict") else chat_data,
+            "timestamp": datetime.datetime.now().isoformat()
         }
+        
+        # Broadcast to all remaining members
+        await self.broadcast_message(message)
+        
+        # Also send directly to the removed member
+        await self.send_personal_message(user_id, message)
+    
+    async def send_typing_indicator(self, user_id: str, typing_data: Dict[str, Any]) -> bool:
+        """Send a typing indicator notification to a user.
+        
+        Args:
+            user_id: The user ID
+            typing_data: The typing data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        typing_data["type"] = "typing_indicator"
+        return await self.send_personal_message(user_id, typing_data)
+    
+    async def update_presence(self, presence_data: Dict[str, Any]) -> None:
+        """Update and broadcast user presence to relevant users.
+        
+        Args:
+            presence_data: The presence data
+        """
+        user_id = presence_data.get("user_id")
+        if not user_id:
+            logger.error("Cannot update presence without user_id")
+            return
+        
+        # Add message type if not present
+        if "type" not in presence_data:
+            presence_data["type"] = "presence_update"
+        
+        # Add timestamp if not present
+        if "timestamp" not in presence_data:
+            presence_data["timestamp"] = datetime.datetime.now().isoformat()
+        
+        # In a real implementation, we would only send presence updates to users
+        # who are interested in the user's presence (e.g., in the same chats)
+        # For simplicity, we'll broadcast to all connected users
+        user_connections_copy = dict(self.user_connections)
+        for target_user_id in user_connections_copy:
+            if target_user_id != user_id:  # Don't send to the user themselves
+                await self.send_personal_message(target_user_id, presence_data)
+    
+    async def send_mention(self, user_id: str, message_data: Dict[str, Any]) -> bool:
+        """Send a mention notification to a user.
+        
+        Args:
+            user_id: The user ID
+            message_data: The message data
+            
+        Returns:
+            bool: True if message was sent to at least one connection, False otherwise
+        """
+        message_data["type"] = "mention"
+        return await self.send_personal_message(user_id, message_data)

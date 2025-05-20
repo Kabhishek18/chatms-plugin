@@ -1,3 +1,5 @@
+# chatms_plugin/core/connection.py
+
 """
 WebSocket connection manager for the ChatMS plugin.
 """
@@ -47,8 +49,8 @@ class ConnectionManager:
                 pass
         
         # Close all WebSocket connections
-        for user_id, connections in self.user_connections.items():
-            for connection in connections:
+        for user_id, connections in list(self.user_connections.items()):
+            for connection in list(connections):
                 try:
                     await connection.close()
                 except Exception as e:
@@ -65,9 +67,10 @@ class ConnectionManager:
                 # Sleep first to avoid immediate ping on startup
                 await asyncio.sleep(self.config.websocket_ping_interval)
                 
-                # Ping all connections
-                for user_id, connections in self.user_connections.items():
-                    for connection in connections:
+                # Ping all connections - create a copy to avoid iteration issues
+                user_connections_copy = dict(self.user_connections)
+                for user_id, connections in user_connections_copy.items():
+                    for connection in list(connections):
                         try:
                             await connection.send_json({"type": "ping", "timestamp": datetime.datetime.now().isoformat()})
                         except Exception as e:
@@ -119,17 +122,22 @@ class ConnectionManager:
             websocket: The WebSocket connection
             user_id: The user ID
         """
-        # Remove from user connections
+        # Remove from user connections - avoid iteration issues
         if user_id in self.user_connections:
             self.user_connections[user_id].discard(websocket)
             if not self.user_connections[user_id]:
                 del self.user_connections[user_id]
         
-        # Remove from all chat rooms
-        for chat_id, connections in self.active_connections.items():
+        # Remove from all chat rooms - create a copy to avoid iteration issues
+        chat_rooms_to_remove = []
+        for chat_id, connections in list(self.active_connections.items()):
             connections.discard(websocket)
             if not connections:
-                del self.active_connections[chat_id]
+                chat_rooms_to_remove.append(chat_id)
+        
+        # Remove empty chat rooms
+        for chat_id in chat_rooms_to_remove:
+            self.active_connections.pop(chat_id, None)
         
         logger.info(f"User {user_id} disconnected")
     
@@ -196,8 +204,9 @@ class ConnectionManager:
             if "timestamp" not in message:
                 message["timestamp"] = datetime.datetime.now().isoformat()
             
-            # Send to all connections in the chat
-            for connection in self.active_connections[chat_id]:
+            # Send to all connections in the chat - create a copy to avoid iteration issues
+            connections_copy = list(self.active_connections[chat_id])
+            for connection in connections_copy:
                 try:
                     await connection.send_json(message)
                 except Exception as e:
@@ -225,9 +234,10 @@ class ConnectionManager:
         if "timestamp" not in message:
             message["timestamp"] = datetime.datetime.now().isoformat()
         
-        # Send to all user connections
+        # Send to all user connections - create a copy to avoid iteration issues
+        connections_copy = list(self.user_connections[user_id])
         sent = False
-        for connection in self.user_connections[user_id]:
+        for connection in connections_copy:
             try:
                 await connection.send_json(message)
                 sent = True
@@ -484,7 +494,8 @@ class ConnectionManager:
         # In a real implementation, we would only send presence updates to users
         # who are interested in the user's presence (e.g., in the same chats)
         # For simplicity, we'll broadcast to all connected users
-        for target_user_id in self.user_connections:
+        user_connections_copy = dict(self.user_connections)
+        for target_user_id in user_connections_copy:
             if target_user_id != user_id:  # Don't send to the user themselves
                 await self.send_personal_message(target_user_id, presence_data)
     

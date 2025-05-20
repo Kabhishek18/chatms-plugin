@@ -49,17 +49,19 @@ def config():
 
 
 @pytest.fixture(scope="function")
-def connection_manager(config):
+async def connection_manager(config):
     """Create a connection manager for testing."""
-    return ConnectionManager(config)
+    manager = ConnectionManager(config)
+    # Don't start the ping task to avoid timing issues
+    manager.active_connections = {}
+    manager.user_connections = {}
+    yield manager
+    await manager.close()
 
 
 @pytest.mark.asyncio
 async def test_connection(connection_manager):
     """Test WebSocket connection."""
-    # Initialize connection manager
-    await connection_manager.init()
-    
     # Create mock WebSocket
     websocket = MockWebSocket()
     user_id = "test_user"
@@ -81,17 +83,11 @@ async def test_connection(connection_manager):
     
     # Check if user is disconnected
     assert user_id not in connection_manager.user_connections
-    
-    # Cleanup
-    await connection_manager.close()
 
 
 @pytest.mark.asyncio
 async def test_chat_room_operations(connection_manager):
     """Test chat room operations."""
-    # Initialize connection manager
-    await connection_manager.init()
-    
     # Create mock WebSocket
     websocket = MockWebSocket()
     user_id = "test_user"
@@ -123,15 +119,11 @@ async def test_chat_room_operations(connection_manager):
     
     # Cleanup
     await connection_manager.disconnect(websocket, user_id)
-    await connection_manager.close()
 
 
 @pytest.mark.asyncio
 async def test_message_broadcasting(connection_manager):
     """Test message broadcasting."""
-    # Initialize connection manager
-    await connection_manager.init()
-    
     # Create mock WebSockets
     websocket1 = MockWebSocket()
     websocket2 = MockWebSocket()
@@ -154,7 +146,7 @@ async def test_message_broadcasting(connection_manager):
     
     # Broadcast message to chat
     message = {
-        "type": "message",  # Add type field
+        "type": "message",
         "chat_id": chat_id,
         "content": "Hello, everyone!",
         "sender_id": user1,
@@ -184,15 +176,11 @@ async def test_message_broadcasting(connection_manager):
     await connection_manager.disconnect(websocket1, user1)
     await connection_manager.disconnect(websocket2, user2)
     await connection_manager.disconnect(websocket3, user3)
-    await connection_manager.close()
 
 
 @pytest.mark.asyncio
 async def test_personal_message(connection_manager):
     """Test personal message sending."""
-    # Initialize connection manager
-    await connection_manager.init()
-    
     # Create mock WebSockets for the same user (multiple devices)
     websocket1 = MockWebSocket()
     websocket2 = MockWebSocket()
@@ -205,7 +193,7 @@ async def test_personal_message(connection_manager):
     
     # Send personal message
     message = {
-        "type": "personal_message",  # Add type field
+        "type": "personal_message",
         "content": "Personal message",
         "timestamp": "2023-01-01T12:00:00"
     }
@@ -229,15 +217,11 @@ async def test_personal_message(connection_manager):
     # Cleanup
     await connection_manager.disconnect(websocket1, user_id)
     await connection_manager.disconnect(websocket2, user_id)
-    await connection_manager.close()
 
 
 @pytest.mark.asyncio
 async def test_notification_methods(connection_manager):
     """Test specialized notification methods."""
-    # Initialize connection manager
-    await connection_manager.init()
-    
     # Create mock WebSocket
     websocket = MockWebSocket()
     user_id = "test_user"
@@ -293,15 +277,11 @@ async def test_notification_methods(connection_manager):
     
     # Cleanup
     await connection_manager.disconnect(websocket, user_id)
-    await connection_manager.close()
 
 
 @pytest.mark.asyncio
 async def test_presence_update(connection_manager):
     """Test presence update functionality."""
-    # Initialize connection manager
-    await connection_manager.init()
-    
     # Create mock WebSockets for different users
     websocket1 = MockWebSocket()
     websocket2 = MockWebSocket()
@@ -338,7 +318,6 @@ async def test_presence_update(connection_manager):
     # Cleanup
     await connection_manager.disconnect(websocket1, user1)
     await connection_manager.disconnect(websocket2, user2)
-    await connection_manager.close()
 
 
 @pytest.mark.asyncio
@@ -369,3 +348,74 @@ async def test_connection_cleanup():
     
     # Cleanup
     await connection_manager.close()
+
+
+@pytest.mark.asyncio
+async def test_multiple_connections_same_user(connection_manager):
+    """Test handling multiple connections for the same user."""
+    # Create multiple mock WebSockets for the same user
+    websocket1 = MockWebSocket()
+    websocket2 = MockWebSocket()
+    websocket3 = MockWebSocket()
+    
+    user_id = "test_user"
+    
+    # Connect all WebSockets for the same user
+    await connection_manager.connect(websocket1, user_id)
+    await connection_manager.connect(websocket2, user_id)
+    await connection_manager.connect(websocket3, user_id)
+    
+    # Check that all connections are stored
+    assert user_id in connection_manager.user_connections
+    assert len(connection_manager.user_connections[user_id]) == 3
+    assert websocket1 in connection_manager.user_connections[user_id]
+    assert websocket2 in connection_manager.user_connections[user_id]
+    assert websocket3 in connection_manager.user_connections[user_id]
+    
+    # Send a personal message
+    message = {"content": "Test message"}
+    result = await connection_manager.send_personal_message(user_id, message)
+    assert result is True
+    
+    # All connections should receive the message
+    assert len(websocket1.sent_messages) == 2  # welcome + personal message
+    assert len(websocket2.sent_messages) == 2  # welcome + personal message
+    assert len(websocket3.sent_messages) == 2  # welcome + personal message
+    
+    # Disconnect one WebSocket
+    await connection_manager.disconnect(websocket1, user_id)
+    
+    # Check that only the disconnected WebSocket was removed
+    assert user_id in connection_manager.user_connections
+    assert len(connection_manager.user_connections[user_id]) == 2
+    assert websocket1 not in connection_manager.user_connections[user_id]
+    assert websocket2 in connection_manager.user_connections[user_id]
+    assert websocket3 in connection_manager.user_connections[user_id]
+    
+    # Disconnect remaining WebSockets
+    await connection_manager.disconnect(websocket2, user_id)
+    await connection_manager.disconnect(websocket3, user_id)
+    
+    # Now the user should be completely disconnected
+    assert user_id not in connection_manager.user_connections
+
+
+@pytest.mark.asyncio
+async def test_empty_message_handling(connection_manager):
+    """Test handling of edge cases with messages."""
+    # Test broadcasting message without chat_id
+    message_without_chat = {
+        "type": "message",
+        "content": "Hello"
+    }
+    
+    # Should not raise an exception, just log an error
+    await connection_manager.broadcast_message(message_without_chat)
+    
+    # Test sending personal message to non-existent user
+    result = await connection_manager.send_personal_message("non_existent_user", {"content": "test"})
+    assert result is False
+    
+    # Test sending presence update without user_id
+    await connection_manager.update_presence({"status": "online"})
+    # Should not raise an exception, just log an error
